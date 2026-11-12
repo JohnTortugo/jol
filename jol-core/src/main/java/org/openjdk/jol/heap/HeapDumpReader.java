@@ -54,9 +54,15 @@ public class HeapDumpReader {
     private final Multiset<Long> classCounts;
     private final Multiset<ClassData> arrayCounts;
     private final Map<Long, Long> classSupers;
+    private final Map<Long, Integer> classInstanceSizes;
     private final File file;
     private final PrintStream verboseOut;
     private final Visitor visitor;
+
+    // Native Image heap dumps: see NativeImageHeap.
+    private long classClassId = -1;
+    private NativeImageHeap.Builder nativeImage;
+    private NativeImageHeap nativeImageHeap;
 
     private int idSize;
     private long readBytes;
@@ -80,6 +86,7 @@ public class HeapDumpReader {
         this.classFields = new Multimap<>();
         this.arrayCounts = new Multiset<>();
         this.classSupers = new HashMap<>();
+        this.classInstanceSizes = new HashMap<>();
         this.buf = new byte[BUF_SIZE];
         this.wrapBuf = ByteBuffer.wrap(buf);
     }
@@ -180,7 +187,11 @@ public class HeapDumpReader {
                     read_U4(); // stack trace
                     long nameID = read_ID();
 
-                    classNames.put(id, ClassUtils.binaryToHuman(strings.get(nameID)));
+                    String name = ClassUtils.binaryToHuman(strings.get(nameID));
+                    classNames.put(id, name);
+                    if (name.equals("java.lang.Class")) {
+                        classClassId = id;
+                    }
                     break;
                 }
 
@@ -243,6 +254,11 @@ public class HeapDumpReader {
             finalClassCounts.add(cd, classCounts.count(id));
         }
 
+        if (nativeImage != null) {
+            nativeImageHeap = nativeImage.build(classDatas, classNames, classInstanceSizes);
+            nativeImage = null;
+        }
+
         if (verboseOut != null) {
             long end = System.nanoTime();
             verboseOut.printf(" done %d MB in %.3f seconds at %.0f MB/sec%n",
@@ -252,6 +268,15 @@ public class HeapDumpReader {
         }
 
         return finalClassCounts;
+    }
+
+    /**
+     * Exact object sizes, if this is a GraalVM Native Image heap dump.
+     *
+     * @return the sizes after {@link #parse()}, or null for other heap dumps
+     */
+    public NativeImageHeap nativeImageHeap() {
+        return nativeImageHeap;
     }
 
     private void digestHeapDump() throws HeapDumpException {
@@ -298,7 +323,11 @@ public class HeapDumpReader {
 
         String typeString = getTypeString(typeClass);
         String typeArrayString = getTypeArrayString(typeClass);
-        arrayCounts.add(new ClassData(typeArrayString, typeString, elements));
+        ClassData cd = new ClassData(typeArrayString, typeString, elements);
+        arrayCounts.add(cd);
+        if (nativeImage != null) {
+            nativeImage.object(id, cd);
+        }
 
         long len = (long) elements * getSize(typeClass);
         if (visitor != null) {
@@ -319,7 +348,11 @@ public class HeapDumpReader {
 
         // Assume Object as component type, the name of the actual class
         // is what we want for the printouts.
-        arrayCounts.add(new ClassData(name, "Object", elements));
+        ClassData cd = new ClassData(name, "Object", elements);
+        arrayCounts.add(cd);
+        if (nativeImage != null) {
+            nativeImage.object(id, cd);
+        }
 
         long len = (long) elements * idSize;
         if (visitor != null) {
@@ -338,12 +371,22 @@ public class HeapDumpReader {
 
         classCounts.add(klassID);
 
-        if (visitor != null) {
-            byte[] bytes = readContents(instanceBytes);
-            String name = classNames.get(klassID);
-            visitor.visitInstance(id, klassID, bytes, name);
+        boolean isHub = (nativeImage != null) && (klassID == nativeImage.classClassId());
+        byte[] bytes = null;
+        if (visitor != null || isHub) {
+            bytes = readContents(instanceBytes);
         } else {
             skipContents(instanceBytes);
+        }
+        if (nativeImage != null) {
+            if (isHub) {
+                nativeImage.hub(id, bytes);
+            }
+            nativeImage.object(id, klassID);
+        }
+        if (visitor != null) {
+            String name = classNames.get(klassID);
+            visitor.visitInstance(id, klassID, bytes, name);
         }
     }
 
@@ -364,7 +407,7 @@ public class HeapDumpReader {
         read_ID(); // protection domain
         read_ID(); // reserved
         read_ID(); // reserved
-        read_U4(); // instance size
+        classInstanceSizes.put(klassID, (int) read_U4()); // instance size
 
         int cpCount = read_U2();
         for (int c = 0; c < cpCount; c++) {
@@ -382,6 +425,7 @@ public class HeapDumpReader {
 
         int offset = 0;
         List<Integer> oopIdx = new ArrayList<>();
+        Map<String, Integer> intFieldOffsets = (klassID == classClassId) ? new HashMap<String, Integer>() : null;
 
         int cpInstance = read_U2();
         for (int c = 0; c < cpInstance; c++) {
@@ -392,10 +436,18 @@ public class HeapDumpReader {
             if (type == 2) {
                 oopIdx.add(offset);
             }
+            if (intFieldOffsets != null && (type == 10 || type == 9)) {
+                intFieldOffsets.put(strings.get(index), offset);
+            }
             offset += getSize(type);
         }
         if (cpInstance == 0) {
             classFields.putEmpty(klassID);
+        }
+
+        if (intFieldOffsets != null) {
+            // In Native Image heap dumps, every java.lang.Class object is a hub that describes a class layout.
+            nativeImage = NativeImageHeap.Builder.forClassRecord(klassID, intFieldOffsets, offset);
         }
 
         if (visitor != null) {
