@@ -27,6 +27,8 @@ package org.openjdk.jol.operations;
 import org.openjdk.jol.Operation;
 import org.openjdk.jol.datamodel.ModelVM;
 import org.openjdk.jol.heap.HeapDumpReader;
+import org.openjdk.jol.heap.HeapDumpSizes;
+import org.openjdk.jol.heap.NativeImageHeap;
 import org.openjdk.jol.info.ClassData;
 import org.openjdk.jol.info.ClassLayout;
 import org.openjdk.jol.info.GraphLayout;
@@ -78,6 +80,7 @@ public class HeapDumpBoxes implements Operation {
 
     private long manualMarginalCost;
     private long arrayMarginalCost;
+    private HeapDumpSizes sizes;
 
     public void computeMarginalCosts() {
         final int base = 1_234_567;
@@ -99,6 +102,23 @@ public class HeapDumpBoxes implements Operation {
 
         long arraySize = ClassLayout.parseInstance(new Integer[size]).instanceSize();
         arrayMarginalCost = arraySize / size;
+    }
+
+    /**
+     * The same costs as {@link #computeMarginalCosts()}, with Native Image object sizes: a HashMap
+     * with a million entries has a table of 2^21 slots, and a node and two boxes per entry.
+     */
+    private void computeMarginalCosts(NativeImageHeap heap) {
+        final int size = 1_000_000;
+        long intSize = heap.allocationSize(ClassData.parseClass(Integer.class));
+        long nodeSize = heap.allocationSize(new ClassData("java.util.HashMap$Node"));
+        if (intSize == 0 || nodeSize == 0) {
+            return; // the dump lacks these classes, keep the costs from this VM
+        }
+        long fullTable = heap.allocationSize(new ClassData("java.util.HashMap$Node[]", "Object", 1 << 21));
+        long emptyTable = heap.allocationSize(new ClassData("java.util.HashMap$Node[]", "Object", 16));
+        manualMarginalCost = (fullTable - emptyTable + size * (nodeSize + 2 * intSize)) / size - intSize;
+        arrayMarginalCost = heap.allocationSize(new ClassData("java.lang.Integer[]", "Object", size)) / size;
     }
 
     public void run(String... args) throws Exception {
@@ -125,15 +145,19 @@ public class HeapDumpBoxes implements Operation {
 
         HeapDumpReader reader = new HeapDumpReader(new File(path), out, mv);
         Multiset<ClassData> data = reader.parse();
+        sizes = HeapDumpSizes.of(reader, layouter);
+        if (sizes.nativeImageHeap() != null) {
+            computeMarginalCosts(sizes.nativeImageHeap());
+        }
 
         out.println();
-        out.println(layouter);
+        out.println(sizes);
         out.println();
 
         long totalSize = 0;
         long totalCount = 0;
         for (ClassData cd : data.keys()) {
-            totalSize += layouter.layout(cd).instanceSize() * data.count(cd);
+            totalSize += sizes.totalSize(cd, data.count(cd));
             totalCount += data.count(cd);
         }
 
@@ -201,7 +225,8 @@ public class HeapDumpBoxes implements Operation {
                 return;
             }
 
-            long instanceSize = ClassLayout.parseClass(cl).instanceSize();
+            boolean nativeImage = sizes.nativeImageHeap() != null;
+            long instanceSize = nativeImage ? sizes.instanceSize(ClassData.parseClass(cl)) : ClassLayout.parseClass(cl).instanceSize();
 
             ASCIITable boxesTable = new ASCIITable(
                     false,
@@ -238,7 +263,7 @@ public class HeapDumpBoxes implements Operation {
             ASCIITable arrayTable = new ASCIITable(
                     false,
                     Integer.MAX_VALUE,
-                    (cl.equals(Integer.class) ?
+                    (cl.equals(Integer.class) && !nativeImage ?
                             "=== " + clName + ", savings with manual cache, or non-default AutoBoxCacheMax:" :
                             "=== " + clName + ", savings with manual cache:"),
                     "SAVED INSTANCES", "SAVED BYTES", "CACHE SHAPE");

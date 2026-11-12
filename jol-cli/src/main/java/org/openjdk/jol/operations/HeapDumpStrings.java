@@ -27,6 +27,7 @@ package org.openjdk.jol.operations;
 import org.openjdk.jol.Operation;
 import org.openjdk.jol.datamodel.ModelVM;
 import org.openjdk.jol.heap.HeapDumpReader;
+import org.openjdk.jol.heap.HeapDumpSizes;
 import org.openjdk.jol.info.ClassData;
 import org.openjdk.jol.layouters.HotSpotLayouter;
 import org.openjdk.jol.layouters.Layouter;
@@ -87,22 +88,23 @@ public class HeapDumpStrings implements Operation {
         StringValueVisitor svv = new StringValueVisitor(sv.valuesToStrings());
         HeapDumpReader stringValueReader = new HeapDumpReader(new File(path), out, svv);
         Multiset<ClassData> data = stringValueReader.parse();
+        HeapDumpSizes sizes = HeapDumpSizes.of(stringValueReader, layouter);
 
         out.println();
-        out.println(layouter);
+        out.println(sizes);
         out.println();
 
         long totalSize = 0;
         long totalCount = 0;
         for (ClassData cd : data.keys()) {
-            totalSize += layouter.layout(cd).instanceSize() * data.count(cd);
+            totalSize += sizes.totalSize(cd, data.count(cd));
             totalCount += data.count(cd);
         }
 
         out.printf("Heap dump contains %,d objects, %,d bytes in total.%n", totalCount, totalSize);
         out.println();
 
-        svv.computeDuplicates(out, layouter);
+        svv.computeDuplicates(out, sizes);
         out.println();
     }
 
@@ -211,14 +213,17 @@ public class HeapDumpStrings implements Operation {
             }
         }
 
-        public void computeDuplicates(PrintStream ps, Layouter layouter) {
-            long stringSize = layouter.layout(ClassData.parseClass(String.class)).instanceSize();
+        public void computeDuplicates(PrintStream ps, HeapDumpSizes sizes) {
+            long stringSize = sizes.instanceSize(ClassData.parseClass(String.class));
+
+            // Native Image has no GC String deduplication: sharing the values needs code changes, too.
+            String valueDedup = (sizes.nativeImageHeap() == null) ? "automatic by GC" : "manual, no GC dedup in Native Image";
 
             ASCIITable table = new ASCIITable(
                     false,
                     "=== Duplicate Strings\n" +
                     "  DUPS: Number of duplicated String instances\n" +
-                    "  SIZE (V): Savings due to String.value dedup (automatic by GC)\n" +
+                    "  SIZE (V): Savings due to String.value dedup (" + valueDedup + ")\n" +
                     "  SIZE (S+V): Savings due to entire String dedup (manual)",
                     "DUPS", "SIZE (V)", "SIZE (S+V)", "VALUE");
 
@@ -226,7 +231,7 @@ public class HeapDumpStrings implements Operation {
                 long count = contents.count(sc) - 1;
                 if (count > 0) {
                     ClassData cd = new ClassData(sc.componentType + "[]", sc.componentType, sc.length);
-                    long size = layouter.layout(cd).instanceSize();
+                    long size = sizes.instanceSize(cd);
                     table.addLine(
                             sc.value() + ((sc.length > 32) ? "... (" + sc.length + " chars)" : ""),
                             count,

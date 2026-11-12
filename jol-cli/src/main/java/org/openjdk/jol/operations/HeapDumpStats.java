@@ -27,6 +27,7 @@ package org.openjdk.jol.operations;
 import org.openjdk.jol.Operation;
 import org.openjdk.jol.datamodel.*;
 import org.openjdk.jol.heap.HeapDumpReader;
+import org.openjdk.jol.heap.HeapDumpSizes;
 import org.openjdk.jol.info.ClassData;
 import org.openjdk.jol.layouters.HotSpotLayouter;
 import org.openjdk.jol.layouters.Layouter;
@@ -73,9 +74,10 @@ public class HeapDumpStats implements Operation {
 
         HeapDumpReader reader = new HeapDumpReader(new File(path), out, null);
         Multiset<ClassData> data = reader.parse();
+        HeapDumpSizes sizes = HeapDumpSizes.of(reader, layouter);
 
         out.println();
-        out.println(layouter);
+        out.println(sizes);
         out.println();
 
         ASCIITable table = new ASCIITable(
@@ -86,8 +88,8 @@ public class HeapDumpStats implements Operation {
         for (ClassData cd : data.keys()) {
             long cnt = data.count(cd);
             if (cnt > 0) {
-                long instanceSize = layouter.layout(cd).instanceSize();
-                table.addLine(cd.prettyName(), cnt, instanceSize, cnt * instanceSize);
+                long instanceSize = sizes.instanceSize(cd);
+                table.addLine(cd.prettyName(), cnt, instanceSize, sizes.totalSize(cd, cnt));
             }
         }
 

@@ -27,6 +27,7 @@ package org.openjdk.jol.operations;
 import org.openjdk.jol.Operation;
 import org.openjdk.jol.datamodel.ModelVM;
 import org.openjdk.jol.heap.HeapDumpReader;
+import org.openjdk.jol.heap.HeapDumpSizes;
 import org.openjdk.jol.info.ClassData;
 import org.openjdk.jol.layouters.HotSpotLayouter;
 import org.openjdk.jol.layouters.Layouter;
@@ -82,15 +83,16 @@ public class HeapDumpDuplicates implements Operation {
 
         HeapDumpReader reader = new HeapDumpReader(new File(path), out, mv);
         Multiset<ClassData> data = reader.parse();
+        HeapDumpSizes sizes = HeapDumpSizes.of(reader, layouter);
 
         out.println();
-        out.println(layouter);
+        out.println(sizes);
         out.println();
 
         long totalSize = 0;
         long totalCount = 0;
         for (ClassData cd : data.keys()) {
-            totalSize += layouter.layout(cd).instanceSize() * data.count(cd);
+            totalSize += sizes.totalSize(cd, data.count(cd));
             totalCount += data.count(cd);
         }
 
@@ -98,8 +100,8 @@ public class HeapDumpDuplicates implements Operation {
         out.println();
 
         List<ExcessRow> excesses = new ArrayList<>();
-        excesses.addAll(iv.compute(layouter));
-        excesses.addAll(av.compute(layouter));
+        excesses.addAll(iv.compute(sizes));
+        excesses.addAll(av.compute(sizes));
         excesses.sort((c1, c2) -> Long.compare(c2.excessV, c1.excessV));
 
         ASCIITable table = new ASCIITable(
@@ -357,7 +359,7 @@ public class HeapDumpDuplicates implements Operation {
             classDatas.put(name, cd);
         }
 
-        public List<ExcessRow> compute(Layouter layouter) {
+        public List<ExcessRow> compute(HeapDumpSizes sizes) {
             List<ExcessRow> excesses = new ArrayList<>();
             for (String name : contents.keySet()) {
                 Multiset<InstanceContents> ics = contents.get(name);
@@ -380,7 +382,7 @@ public class HeapDumpDuplicates implements Operation {
                     throw new IllegalStateException("Internal error: no class data for " + name);
                 }
 
-                long intSize = layouter.layout(cd).instanceSize();
+                long intSize = sizes.instanceSize(cd);
 
                 ASCIITable table = new ASCIITable(
                         true,
@@ -426,7 +428,7 @@ public class HeapDumpDuplicates implements Operation {
             conts.add(new HashedArrayContents(count, componentType, bytes));
         }
 
-        public List<ExcessRow> compute(Layouter layouter) {
+        public List<ExcessRow> compute(HeapDumpSizes sizes) {
             List<ExcessRow> excesses = new ArrayList<>();
             for (String componentType : arrayContents.keySet()) {
                 Multiset<HashedArrayContents> hacs = arrayContents.get(componentType);
@@ -457,7 +459,7 @@ public class HeapDumpDuplicates implements Operation {
                     long count = hacs.count(hac) - 1;
                     if (count > 0) {
                         ClassData cd = new ClassData(componentType + "[]", componentType, hac.length);
-                        long intSize = layouter.layout(cd).instanceSize();
+                        long intSize = sizes.instanceSize(cd);
                         long sumV = count * intSize;
                         table.addLine(hac.value(), count, sumV);
                         excessV += sumV;
