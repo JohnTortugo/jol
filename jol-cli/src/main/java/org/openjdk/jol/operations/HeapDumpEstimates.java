@@ -27,9 +27,11 @@ package org.openjdk.jol.operations;
 import org.openjdk.jol.Operation;
 import org.openjdk.jol.datamodel.*;
 import org.openjdk.jol.heap.HeapDumpReader;
+import org.openjdk.jol.heap.NativeImageHeap;
 import org.openjdk.jol.info.ClassData;
 import org.openjdk.jol.layouters.HotSpotLayouter;
 import org.openjdk.jol.layouters.Layouter;
+import org.openjdk.jol.layouters.NativeImageLayouter;
 import org.openjdk.jol.layouters.RawLayouter;
 import org.openjdk.jol.util.MathUtil;
 import org.openjdk.jol.util.Multiset;
@@ -91,6 +93,11 @@ public class HeapDumpEstimates implements Operation {
         out.printf("%10s,     %s%n", MathUtil.inProperUnits(rawSize), "Total data size");
         out.printf("%10s,     %s%n", String.format("%.2f", 1F * rawSize / rawCount), "Average data per object");
         out.println();
+
+        NativeImageHeap nativeImageHeap = reader.nativeImageHeap();
+        if (nativeImageHeap != null) {
+            printNativeImage(data, nativeImageHeap, rawSize);
+        }
 
         final String msg_noCoops =          "no comp refs (>32 GB max heap)";
         final String msg_noCoops_ccp =      "no comp refs, but comp class ptrs (>32 GB max heap)";
@@ -243,6 +250,30 @@ public class HeapDumpEstimates implements Operation {
             printLine(msg_coops_align64,  rawSize,  256*G,  jdkLilliput32_coops_align64,  jdkLilliput32_coops, jdk8_coops_align64,    jdk17_coops_align64,    jdk25_coops_align64,  jdkLilliput_coops_align64);
             printLine(msg_coops_align128, rawSize,  512*G,  jdkLilliput32_coops_align128, jdkLilliput32_coops, jdk8_coops_align128,   jdk17_coops_align128,   jdk25_coops_align128, jdkLilliput_coops_align128);
         }
+        out.println();
+    }
+
+    private static void printNativeImage(Multiset<ClassData> data, NativeImageHeap heap, long rawSize) {
+        NativeImageLayouter.Mode dumpMode = NativeImageLayouter.Mode.of(heap);
+        long dumped = heap.totalBytes();
+
+        out.println("=== Native Image: this heap dump, and the same objects in other image build modes");
+        out.println();
+        out.printf("%10s, %10s, %10s,     %s%n", "Footprint", "Overhead", "vs. Dump", "Description");
+        printLine("this dump: " + ((dumpMode != null) ? dumpMode.description() : heap.description()), rawSize, MAX, dumped, dumped);
+        if (dumpMode != null) {
+            for (NativeImageLayouter.Mode m : NativeImageLayouter.Mode.values()) {
+                if (m != dumpMode) {
+                    printLine(m.description(), rawSize, MAX, new NativeImageLayouter(m, heap).footprint(data), dumped);
+                }
+            }
+        }
+        out.println();
+        out.println("Other modes lay out every class with the Native Image rules, and keep the objects that carry");
+        out.println("an identity hash field in this dump. " + ((heap.hashMode() == NativeImageHeap.HashMode.OPTIONAL) ?
+                "Hubs keep their inline vtables." :
+                "This dump does not show which objects are hashed, so modes with an optional field count none."));
+        out.println("The HotSpot estimates below lay out the fields that the Native Image build kept, with HotSpot rules.");
         out.println();
     }
 
