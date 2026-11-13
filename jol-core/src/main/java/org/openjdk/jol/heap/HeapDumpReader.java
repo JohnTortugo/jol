@@ -370,23 +370,22 @@ public class HeapDumpReader {
         int instanceBytes = (int) read_U4(); // always fits
 
         classCounts.add(klassID);
+        if (nativeImage != null) {
+            nativeImage.object(id, klassID);
+        }
 
         boolean isHub = (nativeImage != null) && (klassID == nativeImage.classClassId());
-        byte[] bytes = null;
         if (visitor != null || isHub) {
-            bytes = readContents(instanceBytes);
-        } else {
-            skipContents(instanceBytes);
-        }
-        if (nativeImage != null) {
+            byte[] bytes = readContents(instanceBytes);
             if (isHub) {
                 nativeImage.hub(id, bytes);
             }
-            nativeImage.object(id, klassID);
-        }
-        if (visitor != null) {
-            String name = classNames.get(klassID);
-            visitor.visitInstance(id, klassID, bytes, name);
+            if (visitor != null) {
+                String name = classNames.get(klassID);
+                visitor.visitInstance(id, klassID, bytes, name);
+            }
+        } else {
+            skipContents(instanceBytes);
         }
     }
 

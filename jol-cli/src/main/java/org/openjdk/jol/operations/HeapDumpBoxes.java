@@ -145,7 +145,7 @@ public class HeapDumpBoxes implements Operation {
 
         HeapDumpReader reader = new HeapDumpReader(new File(path), out, mv);
         Multiset<ClassData> data = reader.parse();
-        sizes = HeapDumpSizes.of(reader, layouter);
+        sizes = new HeapDumpSizes(reader, layouter);
         if (sizes.nativeImageHeap() != null) {
             computeMarginalCosts(sizes.nativeImageHeap());
         }

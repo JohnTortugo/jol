@@ -28,89 +28,40 @@ import org.openjdk.jol.info.ClassData;
 import org.openjdk.jol.layouters.Layouter;
 
 /**
- * Object sizes for heap dump reports. For HotSpot heap dumps, the sizes come from a layouter
- * that simulates the object layout. For GraalVM Native Image heap dumps, they come from the
- * dump itself, see {@link NativeImageHeap}.
+ * Object sizes for heap dump reports: from the dump itself for GraalVM Native Image heap dumps
+ * (see {@link NativeImageHeap}), from the layouter for other heap dumps.
  */
-public abstract class HeapDumpSizes {
+public final class HeapDumpSizes {
+
+    private final NativeImageHeap heap;
+    private final Layouter layouter;
 
     /**
-     * Sizes for a parsed heap dump.
-     *
      * @param reader   the reader, after {@link HeapDumpReader#parse()}
      * @param layouter the layouter for heap dumps that do not carry their own sizes
      */
-    public static HeapDumpSizes of(HeapDumpReader reader, Layouter layouter) {
-        NativeImageHeap heap = reader.nativeImageHeap();
-        return (heap != null) ? new NativeImageSizes(heap) : new LayouterSizes(layouter);
+    public HeapDumpSizes(HeapDumpReader reader, Layouter layouter) {
+        this.heap = reader.nativeImageHeap();
+        this.layouter = layouter;
     }
-
-    /** Size of one object of this class. */
-    public abstract long instanceSize(ClassData cd);
-
-    /** Size of the {@code count} objects of this class that the heap dump has. */
-    public abstract long totalSize(ClassData cd, long count);
 
     /** The Native Image sizes behind these sizes, or null for other heap dumps. */
     public NativeImageHeap nativeImageHeap() {
-        return null;
+        return heap;
     }
 
-    private static final class LayouterSizes extends HeapDumpSizes {
-        private final Layouter layouter;
-
-        LayouterSizes(Layouter layouter) {
-            this.layouter = layouter;
-        }
-
-        @Override
-        public long instanceSize(ClassData cd) {
-            return layouter.layout(cd).instanceSize();
-        }
-
-        @Override
-        public long totalSize(ClassData cd, long count) {
-            return instanceSize(cd) * count;
-        }
-
-        @Override
-        public String toString() {
-            return layouter.toString();
-        }
+    /** Size of one object of this class. */
+    public long instanceSize(ClassData cd) {
+        return (heap != null) ? heap.instanceSize(cd) : layouter.layout(cd).instanceSize();
     }
 
-    private static final class NativeImageSizes extends HeapDumpSizes {
-        private final NativeImageHeap heap;
+    /** Size of the {@code count} objects of this class that the heap dump has. */
+    public long totalSize(ClassData cd, long count) {
+        return (heap != null && heap.count(cd) == count) ? heap.totalSize(cd) : instanceSize(cd) * count;
+    }
 
-        NativeImageSizes(NativeImageHeap heap) {
-            this.heap = heap;
-        }
-
-        @Override
-        public long instanceSize(ClassData cd) {
-            return heap.instanceSize(cd);
-        }
-
-        @Override
-        public long totalSize(ClassData cd, long count) {
-            if (heap.count(cd) == count) {
-                return heap.totalSize(cd);
-            }
-            return heap.instanceSize(cd) * count;
-        }
-
-        @Override
-        public NativeImageHeap nativeImageHeap() {
-            return heap;
-        }
-
-        @Override
-        public String toString() {
-            StringBuilder sb = new StringBuilder(heap.description());
-            for (String note : heap.notes()) {
-                sb.append(System.lineSeparator()).append("  ").append(note);
-            }
-            return sb.toString();
-        }
+    @Override
+    public String toString() {
+        return (heap != null) ? heap.toString() : layouter.toString();
     }
 }

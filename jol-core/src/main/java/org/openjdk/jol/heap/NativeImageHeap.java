@@ -29,9 +29,8 @@ import org.openjdk.jol.util.MathUtil;
 import org.openjdk.jol.util.Multiset;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -88,11 +87,8 @@ public final class NativeImageHeap {
             return isArrayLike() && (layoutEncoding & (0b101 << 29)) == (0b100 << 29);
         }
 
-        /** Size of an instance without the optional identity hash field. */
+        /** Size of an instance without the optional identity hash field; for pure instance classes. */
         public int instanceSize() {
-            if (!isPureInstance()) {
-                throw new IllegalStateException("Not a pure instance class");
-            }
             return layoutEncoding;
         }
 
@@ -142,20 +138,17 @@ public final class NativeImageHeap {
     private final int typeCheckSlots;
     private final Map<String, Hub> hubsByName;
     private final Map<String, ClassData> classesByName;
-    private final Map<ClassData, Sizes> sizes;
-    private final Sizes total;
+    private final Map<ClassData, Sizes> sizes = new HashMap<>();
+    private final Sizes total = new Sizes();
 
     private NativeImageHeap(int referenceSize, HashMode hashMode, int arrayHeaderSize, int typeCheckSlots,
-                            Map<String, Hub> hubsByName, Map<String, ClassData> classesByName,
-                            Map<ClassData, Sizes> sizes, Sizes total) {
+                            Map<String, Hub> hubsByName, Map<String, ClassData> classesByName) {
         this.referenceSize = referenceSize;
         this.hashMode = hashMode;
         this.arrayHeaderSize = arrayHeaderSize;
         this.typeCheckSlots = typeCheckSlots;
         this.hubsByName = hubsByName;
         this.classesByName = classesByName;
-        this.sizes = sizes;
-        this.total = total;
     }
 
     /** Size of a reference field, in bytes. */
@@ -252,12 +245,13 @@ public final class NativeImageHeap {
         if (hub != null && hub.isArrayLike() && !hub.isHybrid()) {
             return hub.arrayBaseOffset() + (length << hub.arrayIndexShift());
         }
-        int elementSize = elementSize(componentType);
+        int elementSize = sizeOf(componentType, referenceSize);
         return MathUtil.align(arrayHeaderSize, elementSize) + length * elementSize;
     }
 
-    private int elementSize(String componentType) {
-        switch (componentType) {
+    /** Size of a field or an array element of this type, in bytes. */
+    public static int sizeOf(String type, int referenceSize) {
+        switch (type) {
             case "boolean":
             case "byte":
                 return 1;
@@ -295,51 +289,39 @@ public final class NativeImageHeap {
 
     /** A one-line description of the layout found in this dump. */
     public String description() {
-        String hash;
-        switch (hashMode) {
-            case OPTIONAL:
-                hash = "identity hash field only when needed";
-                break;
-            case TYPE_SPECIFIC:
-                hash = "identity hash field in every object";
-                break;
-            default:
-                hash = "identity hash in the object header";
-                break;
-        }
+        String hash = (hashMode == HashMode.OPTIONAL) ? "identity hash field only when needed"
+                : (hashMode == HashMode.TYPE_SPECIFIC) ? "identity hash field in every object"
+                : "identity hash in the object header";
         return "Native Image heap dump (" + referenceSize + "-byte references, " + hash + ")";
     }
 
-    /** What a reader of a report on this dump needs to know about its sizes. */
-    public List<String> notes() {
-        List<String> notes = new ArrayList<>();
-        notes.add("Object sizes are exact: they come from the class layouts in the dump, and from the distance");
-        notes.add("between objects, which shows which objects carry an identity hash field.");
+    /** The description, and what a reader of a report on this dump needs to know about its sizes. */
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder(description());
+        String nl = System.lineSeparator() + "  ";
+        sb.append(nl).append("Object sizes are exact: they come from the class layouts in the dump, and from the distance");
+        sb.append(nl).append("between objects, which shows which objects carry an identity hash field.");
         if (hashMode == HashMode.OPTIONAL) {
-            notes.add(String.format("%,d of %,d objects carry an identity hash field: image heap objects, and hashed objects", total.withHashField, total.count));
-            notes.add("that the GC has moved.");
+            sb.append(nl).append(String.format("%,d of %,d objects carry an identity hash field: image heap objects, and hashed objects", total.withHashField, total.count));
+            sb.append(nl).append("that the GC has moved.");
         }
         if (total.uncertain > 0) {
-            notes.add(String.format("%,d objects could not be sized from the dump; they count with their class size, a lower bound.", total.uncertain));
+            sb.append(nl).append(String.format("%,d objects could not be sized from the dump; they count with their class size, a lower bound.", total.uncertain));
         }
         for (Sizes s : sizes.values()) {
             if (s.minSize != s.maxSize) {
-                notes.add("Where the objects of a class differ in size, the size of one object is their average.");
+                sb.append(nl).append("Where the objects of a class differ in size, the size of one object is their average.");
                 break;
             }
         }
-        return notes;
+        return sb.toString();
     }
 
-    /**
-     * Collects what the heap dump reader sees, and resolves it into exact sizes at the end.
-     */
+    /** Collects what the heap dump reader sees, and resolves it into exact sizes at the end. */
     static final class Builder {
         private final long classClassId;
-        private final int layoutEncodingOffset;
-        private final int monitorOffsetOffset;
-        private final int identityHashOffsetOffset;
-        private final int typeCheckSlotOffset;
+        private final Map<String, Integer> offsets; // of the int and short fields in hub data
         private final int classInstanceBytes;
 
         private final Map<Long, byte[]> hubData = new HashMap<>();
@@ -349,13 +331,9 @@ public final class NativeImageHeap {
         private long lastId;
         private Object lastKey;
 
-        Builder(long classClassId, int layoutEncodingOffset, int monitorOffsetOffset, int identityHashOffsetOffset,
-                int typeCheckSlotOffset, int classInstanceBytes) {
+        private Builder(long classClassId, Map<String, Integer> offsets, int classInstanceBytes) {
             this.classClassId = classClassId;
-            this.layoutEncodingOffset = layoutEncodingOffset;
-            this.monitorOffsetOffset = monitorOffsetOffset;
-            this.identityHashOffsetOffset = identityHashOffsetOffset;
-            this.typeCheckSlotOffset = typeCheckSlotOffset;
+            this.offsets = offsets;
             this.classInstanceBytes = classInstanceBytes;
         }
 
@@ -365,14 +343,10 @@ public final class NativeImageHeap {
          * @param fieldOffsets offsets of the int and short fields of java.lang.Class within its instance data
          */
         static Builder forClassRecord(long classClassId, Map<String, Integer> fieldOffsets, int classInstanceBytes) {
-            Integer le = fieldOffsets.get("layoutEncoding");
-            Integer mo = fieldOffsets.get("monitorOffset");
-            Integer iho = fieldOffsets.get("identityHashOffset");
-            Integer tcs = fieldOffsets.get("typeCheckSlot");
-            if (le == null || mo == null || iho == null) {
+            if (!fieldOffsets.keySet().containsAll(Arrays.asList("layoutEncoding", "monitorOffset", "identityHashOffset"))) {
                 return null;
             }
-            return new Builder(classClassId, le, mo, iho, (tcs == null) ? -1 : tcs, classInstanceBytes);
+            return new Builder(classClassId, fieldOffsets, classInstanceBytes);
         }
 
         long classClassId() {
@@ -382,8 +356,9 @@ public final class NativeImageHeap {
         void hub(long id, byte[] data) {
             if (data.length >= classInstanceBytes) {
                 hubData.put(id, data);
-                if (typeCheckSlotOffset >= 0) {
-                    maxTypeCheckSlot = Math.max(maxTypeCheckSlot, ByteBuffer.wrap(data).getShort(typeCheckSlotOffset));
+                Integer slot = offsets.get("typeCheckSlot");
+                if (slot != null) {
+                    maxTypeCheckSlot = Math.max(maxTypeCheckSlot, ByteBuffer.wrap(data).getShort(slot));
                 }
             }
         }
@@ -418,7 +393,8 @@ public final class NativeImageHeap {
                 return null;
             }
             ByteBuffer bb = ByteBuffer.wrap(data);
-            return new Hub(bb.getInt(layoutEncodingOffset), bb.getInt(monitorOffsetOffset), bb.getInt(identityHashOffsetOffset));
+            return new Hub(bb.getInt(offsets.get("layoutEncoding")), bb.getInt(offsets.get("monitorOffset")),
+                    bb.getInt(offsets.get("identityHashOffset")));
         }
 
         NativeImageHeap build(Map<Long, ClassData> classDatas, Map<Long, String> classNames, Map<Long, Integer> recordSizes) {
@@ -456,8 +432,7 @@ public final class NativeImageHeap {
                 classesByName.put(cd.name(), cd);
             }
 
-            NativeImageHeap heap = new NativeImageHeap(referenceSize, hashMode, arrayHeaderSize, maxTypeCheckSlot + 1, hubsByName, classesByName,
-                    new HashMap<ClassData, Sizes>(), new Sizes());
+            NativeImageHeap heap = new NativeImageHeap(referenceSize, hashMode, arrayHeaderSize, maxTypeCheckSlot + 1, hubsByName, classesByName);
 
             for (Map.Entry<Object, Multiset<Long>> e : gaps.entrySet()) {
                 Object key = e.getKey();
@@ -527,7 +502,6 @@ public final class NativeImageHeap {
                 heap.total.bytes += s.bytes;
                 heap.total.withHashField += s.withHashField;
                 heap.total.uncertain += s.uncertain;
-                heap.total.hybridExtra += s.hybridExtra;
             }
             return heap;
         }

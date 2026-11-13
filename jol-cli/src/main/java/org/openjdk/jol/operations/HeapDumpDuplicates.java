@@ -83,7 +83,7 @@ public class HeapDumpDuplicates implements Operation {
 
         HeapDumpReader reader = new HeapDumpReader(new File(path), out, mv);
         Multiset<ClassData> data = reader.parse();
-        HeapDumpSizes sizes = HeapDumpSizes.of(reader, layouter);
+        HeapDumpSizes sizes = new HeapDumpSizes(reader, layouter);
 
         out.println();
         out.println(sizes);

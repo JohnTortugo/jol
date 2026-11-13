@@ -88,7 +88,7 @@ public class HeapDumpStrings implements Operation {
         StringValueVisitor svv = new StringValueVisitor(sv.valuesToStrings());
         HeapDumpReader stringValueReader = new HeapDumpReader(new File(path), out, svv);
         Multiset<ClassData> data = stringValueReader.parse();
-        HeapDumpSizes sizes = HeapDumpSizes.of(stringValueReader, layouter);
+        HeapDumpSizes sizes = new HeapDumpSizes(stringValueReader, layouter);
 
         out.println();
         out.println(sizes);
